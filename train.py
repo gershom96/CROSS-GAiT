@@ -2,53 +2,33 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, WeightedRandomSampler
 import torch.optim as optim
+import wandb
 
 from util.datasets import MultimodalDataset
-
-
 from networks.causal_cnn import CausalCNNEncoder
 from networks.models_mae import load_encoder
 from networks.cross_attention import CrossAttentionBlock
 from losses.sup_con_loss import SupConLoss
 import numpy as np
-
 import random
 import timm
 import time
+import os
 
 
 def create_weighted_sampler(labels):
-    # Count the number of samples in each class
     class_counts = np.bincount(labels)
-    
-    # Calculate the weights for each sample based on the class frequency
     class_weights = 1.0 / class_counts
     sample_weights = [class_weights[label] for label in labels]
-    
-    # Create a WeightedRandomSampler to sample based on the calculated weights
     sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
-    
     return sampler
 
-def create_dataloader(pkl_file, batch_size=32):
-    # Create the dataset
-    dataset = MultimodalDataset(pkl_file)
-    
-    # Create the weighted sampler
-    sampler = create_weighted_sampler(dataset.labels)
-    
-    # Create the DataLoader with the sampler
-    dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, drop_last=True)
-    
-    return dataloader
 
 def load_causal_cnn_encoder(causal_cnn_checkpoint_path, device):
-    # Load the causal CNN model and map to the current available device
     checkpoint = torch.load(causal_cnn_checkpoint_path, map_location=device)
-    causal_cnn_encoder = CausalCNNEncoder(in_channels=18, out_channels=160, channels=40, depth=10, reduced_size=320, kernel_size=3)  # Replace with your model initialization
+    causal_cnn_encoder = CausalCNNEncoder(in_channels=18, out_channels=160, channels=40, depth=10, reduced_size=320, kernel_size=3)
     causal_cnn_encoder.load_state_dict(checkpoint)
 
-    # Freeze Causal CNN Encoder
     for param in causal_cnn_encoder.parameters():
         param.requires_grad = False
 
@@ -56,33 +36,21 @@ def load_causal_cnn_encoder(causal_cnn_checkpoint_path, device):
     causal_cnn_encoder.eval()
     return causal_cnn_encoder
 
-# Define the full model
+
 class FusionModel(nn.Module):
-    def __init__(self, mae_model, causal_cnn_encoder, d_k=160, d_v=160, d_embed=768, num_self_attn_layers=3, num_heads=4, projection_dim = 64):
+    def __init__(self, mae_model, causal_cnn_encoder, d_k=160, d_v=160, d_embed=768, num_self_attn_layers=3, num_heads=4, projection_dim=64):
         super(FusionModel, self).__init__()
-        
-        # Encoders (Set them to eval mode and freeze them)
         self.mae_model = mae_model
         self.causal_cnn_encoder = causal_cnn_encoder
 
-        # Freeze MAE and Causal CNN Encoders
         for param in self.mae_model.parameters():
             param.requires_grad = False
         for param in self.causal_cnn_encoder.parameters():
             param.requires_grad = False
-        
-        # Cross Attention Block
-        self.cross_attention_block = CrossAttentionBlock(d_k=d_k, d_v=d_v, d_embed=d_embed)
-        
-        # Stack of Self-Attention Layers using PyTorch's built-in MultiheadAttention
-        self.self_attention_layers = nn.ModuleList(
-            [nn.MultiheadAttention(embed_dim=d_v, num_heads=num_heads, batch_first=True) for _ in range(num_self_attn_layers)]
-        )
-        
-        # Layer Normalization
-        self.norm_layers = nn.ModuleList([nn.LayerNorm(d_v) for _ in range(num_self_attn_layers)])
 
-        # Projection head for contrastive loss
+        self.cross_attention_block = CrossAttentionBlock(d_k=d_k, d_v=d_v, d_embed=d_embed)
+        self.self_attention_layers = nn.ModuleList([nn.MultiheadAttention(embed_dim=d_v, num_heads=num_heads, batch_first=True) for _ in range(num_self_attn_layers)])
+        self.norm_layers = nn.ModuleList([nn.LayerNorm(d_v) for _ in range(num_self_attn_layers)])
         self.projection_head = nn.Sequential(
             nn.Linear(d_v, projection_dim),
             nn.ReLU(),
@@ -90,44 +58,49 @@ class FusionModel(nn.Module):
         )
 
     def forward(self, image, time_series):
-        # Forward pass through encoders
         mae_output = self.mae_model(image, mask_ratio=0.75)
         time_series_output = self.causal_cnn_encoder(time_series).unsqueeze(1)
-        
-        # Cross attention between time series and image latent representations
         cross_attention_output = self.cross_attention_block(time_series_output, mae_output, mae_output)
         
-        # Pass through the stack of self-attention layers
         for i, self_attn in enumerate(self.self_attention_layers):
-            # Self-attention is applied to the cross-attention output
             attn_output, _ = self_attn(cross_attention_output, cross_attention_output, cross_attention_output)
         cross_attention_output = attn_output
-        projected_output = self.projection_head(cross_attention_output.squeeze(1))  # Removing the singleton dimension
-
+        projected_output = self.projection_head(cross_attention_output.squeeze(1))
         return projected_output
 
-# Load the encoders and define the fusion model
-def main():
 
-    batch_size = 32
-    num_epochs = 10  # Define the number of epochs
+def save_checkpoint(epoch, model, optimizer, loss, checkpoint_dir='checkpoints'):
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    checkpoint_path = os.path.join(checkpoint_dir, f'model_epoch_{epoch}.pth')
+    
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss': loss
+    }, checkpoint_path)
+    
+    print(f"Checkpoint saved at {checkpoint_path}")
+
+
+def main():
+    # Initialize wandb
+    wandb.init(project="fusion_model_training")
+
+    batch_size = 256
+    num_epochs = 100
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    
-    # Define the paths to your model checkpoints
     mae_checkpoint_path = './models/mae_encoder.pth'
     causal_cnn_checkpoint_path = './models/encoder_checkpoint_epoch_1_step_600_CausalCNN_encoder.pth'
 
-    # Load encoders
     mae_model = load_encoder(mae_checkpoint_path, device)
     causal_cnn_encoder = load_causal_cnn_encoder(causal_cnn_checkpoint_path, device)
     
-    # Define the fusion model with n self-attention layers
     fusion_model = FusionModel(mae_model, causal_cnn_encoder, d_k=160, d_v=160, d_embed=768, num_self_attn_layers=3, num_heads=4).to(device)
 
     criterion = SupConLoss(temperature=0.07).to(device)
-    optimizer = optim.AdamW(fusion_model.parameters(), lr=1e-4, weight_decay=1e-2)  # Choose appropriate learning rate and weight decay
-
+    optimizer = optim.AdamW(fusion_model.parameters(), lr=1e-4, weight_decay=1e-2)
 
     h5_file = '/home/gershom/Documents/GAMMA/ICRA-2025/Outputs/all_data_by_terrain.h5'
     
@@ -145,37 +118,38 @@ def main():
     sampler = create_weighted_sampler(dataset.labels)
     dataloader = DataLoader(dataset, batch_size, sampler=sampler, num_workers=4)
 
-    # Training Loop
-    fusion_model.train()  # Make sure the model is in training mode
+    fusion_model.train()
 
     for epoch in range(num_epochs):
         epoch_loss = 0.0
         
         for batch_idx, (time_series_data, image_data, labels) in enumerate(dataloader):
             time_series_data, image_data, labels = time_series_data.to(device), image_data.to(device), labels.to(device)
-
-            # Zero out the gradients
             optimizer.zero_grad()
-
-            # Forward pass through the fusion model
             projections = fusion_model(image_data, time_series_data)
-
-            # Reshape the projections for contrastive loss
-            projections = projections.unsqueeze(1)  # [batch_size, 1, feature_dim] - Assuming one view per sample
-            
-            # Compute the contrastive loss
-            loss = criterion(projections, labels)  # SupConLoss takes [batch_size, n_views, feature_dim]
-            
-            # Backpropagation
-            loss.backward()  # Computes the gradients
-            
-            # Optimizer step (updates the weights)
+            projections = projections.unsqueeze(1)
+            loss = criterion(projections, labels)
+            loss.backward()
             optimizer.step()
 
-            # Accumulate loss for the batch
+            # Print step loss
+            print(f"Epoch [{epoch+1}/{num_epochs}], Step [{batch_idx+1}/{len(dataloader)}], Loss: {loss.item():.4f}")
+
             epoch_loss += loss.item()
 
-        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {epoch_loss/len(dataloader):.4f}")
+        avg_epoch_loss = epoch_loss / len(dataloader)
+        print(f"Epoch [{epoch+1}/{num_epochs}], Average Loss: {avg_epoch_loss:.4f}")
+        
+        # Log epoch loss to wandb
+        wandb.log({"Epoch": epoch + 1, "Loss": avg_epoch_loss})
+        
+        # Save checkpoint every epoch
+
+        if ( epoch+1 % 10 == 0 or epoch == num_epochs-1):
+            save_checkpoint(epoch + 1, fusion_model, optimizer, avg_epoch_loss)
+
+    wandb.finish()
+
 
 if __name__ == "__main__":
     main()
