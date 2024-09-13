@@ -1,11 +1,8 @@
-import os
-import time
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, JointState
 from std_msgs.msg import Float32MultiArray
 from cv_bridge import CvBridge, CvBridgeError
-import cv2
 import torch
 import numpy as np
 from collections import deque
@@ -17,6 +14,7 @@ class CrossGaitInferenceNode(Node):
     def __init__(self):
         super().__init__('gait_parameter_inference_node')
 
+        print("Initialising Cross-Gait")
         self.bridge = CvBridge()
         self.latest_image = None
 
@@ -137,7 +135,7 @@ class CrossGaitInferenceNode(Node):
 
         image_tensor = torch.from_numpy(cv_image).permute(2, 0, 1)
 
-        return image_tensor
+        return image_tensor.float()
 
     def inference_callback(self):
         if self.latest_image is None or len(self.time_series_buffer) < 100:
@@ -210,5 +208,11 @@ def main(args=None):
     rclpy.init(args=args)
     cross_gait_inference_node = CrossGaitInferenceNode()
     rclpy.spin(cross_gait_inference_node)
+
+    print("Hi")
     cross_gait_inference_node.destroy_node()
     rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()
