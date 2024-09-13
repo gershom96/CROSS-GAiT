@@ -3,45 +3,19 @@ import time
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, JointState
+from std_msgs.msg import Float32MultiArray
 from cv_bridge import CvBridge, CvBridgeError
 import cv2
 import torch
 import numpy as np
 from collections import deque
-from ghost_manager_interfaces.srv import EnsureMode, SetParam
-from std_msgs.msg import UInt32
 
 # Import your model class
 from networks.fused_model_ import FusionModelWithRegression
 
-class CrossGait(Node):
+class CrossGaitInferenceNode(Node):
     def __init__(self):
-        super().__init__('param_bag_recorder')
-
-        self.cli = self.create_client(SetParam, '/set_param')
-        while not self.cli.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info('/set_param service not available, waiting again...')
-        self.req = SetParam.Request()
-
-        self.mode_client = self.create_client(EnsureMode, 'ensure_mode')
-        while not self.mode_client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info('EnsureMode service not available, waiting again...')
-        self.mode_req = EnsureMode.Request()
-
-        self.param_client = self.create_client(SetParam, 'set_param')
-        while not self.param_client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info('SetParam service not available, waiting again...')
-        self.param_req = SetParam.Request()
-
-        self.ensure_mode("control_mode", 180)
-        self.ensure_mode("action", 2)  
-
-        # self.hill_pub = self.create_publisher(UInt32, '/command/setHill', 10)
-        # self.set_Mode = UInt32()
-        # self.set_Mode.data = 1
-        # self.unset_Mode = UInt32()
-        # self.unset_Mode.data = 0
-        # self.hill_pub.publish(self.set_Mode)
+        super().__init__('gait_parameter_inference_node')
 
         self.bridge = CvBridge()
         self.latest_image = None
@@ -69,6 +43,13 @@ class CrossGait(Node):
         self.latest_imu_msg = None
         self.latest_joint_state_msg = None
 
+        # Publisher
+        self.parameter_publisher = self.create_publisher(
+            Float32MultiArray,
+            '/gait_parameters',
+            10
+        )
+
         regressor_path = './checkpoints/regressor_checkpoint_epoch_2_step_final.pth'
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -92,8 +73,9 @@ class CrossGait(Node):
         self.image_mean = np.array([0.485, 0.456, 0.406])
         self.image_std = np.array([0.229, 0.224, 0.225])
 
-        self.timer = self.create_timer(0.5, self.inference_callback)  
-        self.step_height = 0.14 
+        self.timer = self.create_timer(0.5, self.inference_callback)
+
+        self.step_height = 0.14
         self.hip_splay = 0.05
 
         self.max_d_step_height = 0.01
@@ -131,7 +113,7 @@ class CrossGait(Node):
         time_series_sample = np.concatenate([linear_acceleration, angular_velocity, joint_efforts])
         self.time_series_buffer.append(time_series_sample)
 
-        self.latest_imu_msg = None 
+        self.latest_imu_msg = None
         self.latest_joint_state_msg = None
 
     def process_image(self, image_msg):
@@ -146,8 +128,8 @@ class CrossGait(Node):
         col_start = mid - 112
         col_end = mid + 112
         row_start = height - 224
-        row_end = height + 1        
-        
+        row_end = height + 1
+
         cv_image = cv_image[row_start:row_end, col_start:col_end, :]
         cv_image = cv_image.astype(np.float32) / 255.0
 
@@ -166,8 +148,8 @@ class CrossGait(Node):
         if image is None:
             return
 
-        time_series_array = np.array(self.time_series_buffer)  
-        time_series_array = time_series_array.T 
+        time_series_array = np.array(self.time_series_buffer)
+        time_series_array = time_series_array.T
 
         time_series_mean = self.time_series_mean.reshape(-1, 1)
         time_series_std = self.time_series_std.reshape(-1, 1)
@@ -175,88 +157,58 @@ class CrossGait(Node):
 
         time_series_tensor = torch.from_numpy(time_series_array).float()
 
-        images = torch.unsqueeze(image, 0).to(self.device) 
-        time_series_tensor = torch.unsqueeze(time_series_tensor, 0).to(self.device)  
+        images = torch.unsqueeze(image, 0).to(self.device)
+        time_series_tensor = torch.unsqueeze(time_series_tensor, 0).to(self.device)
 
         with torch.no_grad():
             output = self.fusion_model_with_regression(images, time_series_tensor)
 
-        output = output.cpu().numpy().tolist()[0] 
-
+        output = output.cpu().numpy().tolist()[0]
         print(output)
+        step_height, hip_splay = self.dynamic_window_gait_set(output)
 
-        # self.dynamic_window_gait_set(output)
-        # for name, value in zip(self.param_names, output):
-        #     self.set_param(name, [value]) 
+        # Prepare the message
+        params_msg = Float32MultiArray()
+        params_msg.data = [step_height, hip_splay]
 
-        
-        self.get_logger().info(f"Set parameters: {dict(zip(self.param_names, output))}")
+        # Publish the parameters
+        self.parameter_publisher.publish(params_msg)
 
-    def set_param(self, param_name, value, planner=False):
-        self.param_req.param.name = param_name
-        self.param_req.param.val = value
-        self.param_req.param.planner = planner
-        future = self.param_client.call_async(self.param_req)
-        rclpy.spin_until_future_complete(self, future)
-        response = future.result()
-        if response is not None:
-            self.get_logger().info('%s' % response.result_str)
-        else:
-            self.get_logger().error('Failed to receive response from set_param service')
-
-    def ensure_mode(self, field_name, valdes):
-        self.mode_req.field = field_name
-        self.mode_req.valdes = valdes
-        future = self.mode_client.call_async(self.mode_req)
-        rclpy.spin_until_future_complete(self, future)
-        response = future.result()
-        if response is not None:
-            self.get_logger().info('%s' % response.result_str)
-        else:
-            self.get_logger().error('Failed to receive response from ensure_mode service')
+        self.get_logger().info(f"Published parameters: Step Height: {step_height}, Hip Splay: {hip_splay}")
 
     def dynamic_window_gait_set(self, params):
-        
-        d_step_height = abs(params[0]-self.step_height)
-        d_hip_splay = abs(params[1]-self.hip_splay)
-        
-        step_height = self.step_height
-        hip_splay = self.hip_splay
 
-        limit_step = False
-        limit_hip = False
+        predicted_step_height = params[0]
+        predicted_hip_splay = params[1]
 
-        if( d_step_height > self.max_d_step_height ):
-            step_height = step_height+self.max_d_step_height
-            limit_step = True
+        # Calculate differences
+        d_step_height = predicted_step_height - self.step_height
+        d_hip_splay = predicted_hip_splay - self.hip_splay
 
-        if( d_hip_splay > self.max_d_hip_splay ):
-            hip_splay = hip_splay+self.max_d_hip_splay
-            limit_hip = True
-        
-        if( step_height > self.max_step_height ):
-            step_height = self.max_step_height
-            limit_step = True        
-        elif( step_height < self.min_step_height ):
-            step_height = self.min_step_height
-            limit_step = True
-        if ( hip_splay > self.max_hip_splay ):
-            hip_splay = self.max_hip_splay
-            limit_hip = True
-        elif ( hip_splay < self.min_hip_splay ):
-            hip_splay = self.max_hip_splay
-            limit_hip = True
+        # Limit the changes
+        if abs(d_step_height) > self.max_d_step_height:
+            d_step_height = np.sign(d_step_height) * self.max_d_step_height
 
-        if(not limit_hip and not limit_step):
-            step_height = round(params[0],2)
-            hip_splay = round(params[1],2)
-        
-        self.step_height = step_height
-        self.hip_splay = hip_splay
+        if abs(d_hip_splay) > self.max_d_hip_splay:
+            d_hip_splay = np.sign(d_hip_splay) * self.max_d_hip_splay
+
+        # Update parameters
+        self.step_height += d_step_height
+        self.hip_splay += d_hip_splay
+
+        # Enforce bounds
+        self.step_height = np.clip(self.step_height, self.min_step_height, self.max_step_height)
+        self.hip_splay = np.clip(self.hip_splay, self.min_hip_splay, self.max_hip_splay)
+
+        # Round off to two decimal places
+        self.step_height = round(self.step_height, 2)
+        self.hip_splay = round(self.hip_splay, 2)
+
+        return self.step_height, self.hip_splay
 
 def main(args=None):
     rclpy.init(args=args)
-    cross_gait = CrossGait()
-    rclpy.spin(cross_gait)
-    cross_gait.destroy_node()
+    cross_gait_inference_node = CrossGaitInferenceNode()
+    rclpy.spin(cross_gait_inference_node)
+    cross_gait_inference_node.destroy_node()
     rclpy.shutdown()
