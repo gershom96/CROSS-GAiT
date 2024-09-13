@@ -157,3 +157,56 @@ class MultimodalDataset(Dataset):
         image_tensor = (image_tensor - self.image_mean) / self.image_std
         
         return time_series_tensor, image_tensor, label
+    
+
+
+class MultimodalParamDataset(Dataset):
+    def __init__(self, h5_file, time_series_mean, time_series_std, image_mean, image_std):
+        # Open the HDF5 file for reading
+        self.h5_file = h5_file
+
+        # Store the provided means and standard deviations for normalization
+        self.time_series_mean = torch.tensor(time_series_mean, dtype=torch.float32).view(-1, 1)  # Reshape to [channels, 1]
+        self.time_series_std = torch.tensor(time_series_std, dtype=torch.float32).view(-1, 1)
+        
+        self.image_mean = torch.tensor(image_mean, dtype=torch.float32).view(3, 1, 1)  # For RGB channels
+        self.image_std = torch.tensor(image_std, dtype=torch.float32).view(3, 1, 1)
+        
+        self.terrain_params={0: [0.03, 0.05], 1:[0.12, 0.05], 2: [0.21, 0.05], 3: [0.3, 0.13], 4: [0.1, 0.13]}
+        self.samples = []
+        self.labels = []
+        self.sampler_labels = []
+
+        # Load the data from the HDF5 file
+        with h5py.File(self.h5_file, 'r') as hf:
+            # Loop through each terrain (0, 1, 2, 3, 4)
+            for terrain_label in hf.keys():
+                group = hf[terrain_label]
+                time_series_data = group['time_series'][:]
+                image_data = group['image'][:]
+
+                # Store the data with corresponding labels
+                for i in range(time_series_data.shape[0]):
+                    self.samples.append([time_series_data[i], image_data[i]])
+                    self.labels.append(self.terrain_params[int(terrain_label)])
+                    self.sampler_labels.append(int(terrain_label))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        time_series_data, image_data = self.samples[idx]
+        label = self.labels[idx]
+        
+        # Convert the data to tensors
+        time_series_tensor = torch.tensor(time_series_data, dtype=torch.float32)
+        image_tensor = torch.tensor(image_data, dtype=torch.float32).permute(2, 0, 1)/ 255.0  # Convert to CxHxW
+        
+        # Normalize the time series data
+        time_series_tensor = (time_series_tensor - self.time_series_mean) / self.time_series_std
+        
+        # Normalize the image data
+        image_tensor = (image_tensor - self.image_mean) / self.image_std
+        
+        label_tensor = torch.tensor(label, dtype=torch.float32)
+        return time_series_tensor, image_tensor, label_tensor
