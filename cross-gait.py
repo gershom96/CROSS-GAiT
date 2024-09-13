@@ -184,6 +184,8 @@ class CrossGait(Node):
         output = output.cpu().numpy().tolist()[0] 
 
         print(output)
+
+        # self.dynamic_window_gait_set(output)
         # for name, value in zip(self.param_names, output):
         #     self.set_param(name, [value]) 
 
