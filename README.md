@@ -2,7 +2,7 @@
 
 Gershom Seneviratne, Kasun Weerakoon, Mohamed Elnoor, Vignesh Rajgopal, Harshavarthan Varatharajan, Mohamed Khalid M Jaffar, Jason Pusey and Dinesh Manocha
 
-![CROSS-GAiT System Architecture](https://github.com/gershom96/CROSS-GAiT/blob/master/doc/Arch.jpeg)
+![CROSS-GAiT System Architecture](https://github.com/gershom96/CROSS-GAiT/blob/main/doc/Arch.jpeg)
 
 ## Abstract
 
