@@ -1,3 +1,12 @@
-# CROSS-GAiT
+# [CROSS-GAiT: Cross-Attention-Based Multimodal Representation Fusion for Parametric Gait Adaptation in Complex Terrains (submitted to ICRA 2025)](https://www.arxiv.org/pdf/2409.17262)
 
-This is the official repository for CROSS-GAiT
+Gershom Seneviratne, Kasun Weerakoon, Mohamed Elnoor, Vignesh Rajgopal, Harshavarthan Varatharajan, Mohamed Khalid M Jaffar, Jason Pusey and Dinesh Manocha
+
+![CROSS-GAiT System Architecture](https://github.com/gershom96/CROSS-GAiT/blob/master/doc/Arch.jpeg)
+
+## Abstract
+
+We present CROSS-GAiT, a novel algorithm for quadruped robots that uses Cross Attention to fuse terrain representations derived from visual and time-series inputs, including linear accelerations, angular velocities, and joint efforts. These fused representations are used to adjust the robot's step height and hip splay, enabling adaptive gaits that respond dynamically to varying terrain conditions. We generate these terrain representations by processing visual inputs through a masked Vision Transformer (ViT) encoder and time-series data through a dilated causal convolutional encoder. The cross-attention mechanism then selects and integrates the most relevant features from each modality, combining terrain characteristics with robot dynamics for better-informed gait adjustments. CROSS-GAiT uses the combined representation to dynamically adjust gait parameters in response to varying and unpredictable terrains. We train CROSS-GAiT on data from diverse terrains, including asphalt, concrete, brick pavements, grass, dense vegetation, pebbles, gravel, and sand. Our algorithm generalizes well and adapts to unseen environmental conditions, enhancing real-time navigation performance. CROSS-GAiT was implemented on a Ghost Robotics Vision 60 robot and extensively tested in complex terrains with high vegetation density, uneven/unstable surfaces, sand banks, deformable substrates, etc. We observe at least a 7.04% reduction in IMU energy density and a 27.3% reduction in total joint effort, which directly correlates with increased stability and reduced energy usage when compared to state-of-the-art methods. Furthermore, CROSS-GAiT demonstrates at least a 64.5% increase in success rate and a 4.91% reduction in time to reach the goal in four complex scenarios. Additionally, the learned representations perform 4.48% better than the state-of-the-art on a terrain classification task.
+
+# Video
+A video summary and demonstrations of the system can be found [here](https://www.youtube.com/watch?v=ON7yi-NY_dg)
